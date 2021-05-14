@@ -10,9 +10,9 @@
 #include <cassert>
 #include <sys/epoll.h>
 
-#include "locker.h"
-#include "threadpool.h"
-#include "http_conn.h"
+#include "./locker/locker.h"
+#include "./threadpool/threadpool.h"
+#include "./http/http_conn.h"
 
 #define MAX_FD 65536
 #define MAX_EVENT_NUMBER 10000

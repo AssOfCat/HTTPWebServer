@@ -11,7 +11,7 @@ const char* error_500_title = "Internal Error";
 const char* error_500_form = "There was an unusual problem serving the requested file. \n";
 
 //网站根目录
-const char* doc_root = "/var/www/html";
+const char* doc_root = "/var/www";
 
 //设置非阻塞fd
 static int setnonblocking( int fd ){
@@ -61,7 +61,7 @@ void http_conn::close_conn( bool real_close ){
 }
 
 //初始化：将socket加入监听，计数加一
-void http_conn::init( int sockfd, const sockaddr_in& addr ){
+void http_conn::init( int sockfd, const sockaddr_in& addr){
     m_sockfd = sockfd;
     m_address = addr;
     //下面两行是为了避免TIME_WAIT，仅用于调试，实际使用的时候要关掉
@@ -90,6 +90,8 @@ void http_conn::init(){
     m_checked_idx = 0;
     m_read_idx = 0;
     m_write_idx = 0;
+    cgi = 0;
+    doc_root = "/var/www";
     memset( m_read_buf, '\0', READ_BUFFER_SIZE);
     memset( m_write_buf, '\0', WRITE_BUFFER_SIZE);
     memset( m_real_file, '\0', FILENAME_LEN);
@@ -161,6 +163,9 @@ http_conn::HTTP_CODE http_conn::parse_request_line( char* text ){
     char* method = text;
     if( strcasecmp( method, "GET" ) == 0){//strcasecmp比较字符串，相等返回0
         m_method = GET;
+    }else if(strcasecmp( method, "POST" ) == 0){
+        m_method=POST;
+        cgi=1;
     }else{
         return BAD_REQUEST;
     }
@@ -183,10 +188,19 @@ http_conn::HTTP_CODE http_conn::parse_request_line( char* text ){
         m_url += 7;
         m_url = strchr( m_url, '/');//strchr查找第一个给定字符处
     }
+    //增加https情况
+    if(strncasecmp(m_url,"https://",8)==0)
+    {
+        m_url+=8;
+        m_url=strchr(m_url,'/');
+    }
 
     if( !m_url || m_url[0] != '/'){
         return BAD_REQUEST;
     }
+    //如果url是/转到欢迎界面
+    if(strlen(m_url)==1)
+        strcat(m_url,"judge.html");
 
     m_check_state = CHECK_STATE_HEADER;
     //只收到请求行还不够
@@ -257,6 +271,8 @@ http_conn::HTTP_CODE http_conn::parse_content( char* text ){
     //因为此时请求头的已经被分析完了，属于checkedidx之前的内容了
     if( m_read_idx >= (m_checked_idx + m_content_length) ){
         text[m_content_length] = '\0';
+        //post请求中最后输入的是userpass
+        m_string = text;
         return GET_REQUEST;
     }
     return NO_REQUEST;
@@ -279,7 +295,7 @@ http_conn::HTTP_CODE http_conn::process_read(){
         text = get_line();
         m_start_line = m_checked_idx;
         printf( "got 1 http line: %s\n", text);
-
+        
         //注意checkstate一开始的状态是CHECK_STATE_REQUESTLINE
         //也就是会从请求行开始的状态机
         switch(m_check_state){
@@ -319,7 +335,37 @@ http_conn::HTTP_CODE http_conn::process_read(){
 http_conn::HTTP_CODE http_conn::do_request(){
     strcpy( m_real_file, doc_root);//复制字符串，源必须有‘\0’，目的必须够大且无重叠
     int len = strlen( doc_root );
-    strncpy( m_real_file + len, m_url, FILENAME_LEN - len - 1);
+    //strncpy( m_real_file + len, m_url, FILENAME_LEN - len - 1);
+    //找到m_url中/的位置
+    const char *p = strrchr(m_url, '/');
+
+    //cgi登录注册校验
+    if (cgi == 1 && (*(p + 1) == '2' || *(p + 1) == '3')){
+        //根据标志判断是登录检测还是注册检测
+        //同步线程登录校验
+        //CGI多进程登录校验
+    }
+    //如果请求资源是/0，跳到注册界面
+    if (*(p + 1) == '0'){
+        char *m_url_real = (char *)malloc(sizeof(char) * 200);
+        strcpy(m_url_real, "/register.html");
+        //拼接
+        strncpy(m_real_file + len, m_url_real, strlen(m_url_real));
+
+        free(m_url_real);
+    }else if(*(p + 1) == '1'){
+        //如果是/1跳转到登录界面
+        char *m_url_real = (char *)malloc(sizeof(char) * 200);
+        strcpy(m_url_real, "/log.html");
+        //拼接
+        strncpy(m_real_file + len, m_url_real, strlen(m_url_real));
+
+        free(m_url_real);
+    }else{
+        //如果都不是就拼接原本的内容
+        strncpy(m_real_file + len, m_url, FILENAME_LEN - len - 1);
+    }
+
     //获取文件状态信息到m_file_stat
     if( stat( m_real_file, &m_file_stat ) < 0){
         return NO_RESOURCE;
@@ -346,6 +392,7 @@ http_conn::HTTP_CODE http_conn::do_request(){
 void http_conn::unmap(){
     if( m_file_address){
         munmap( m_file_address, m_file_stat.st_size );
+        m_file_address = 0;
     }
 }
 
@@ -353,11 +400,8 @@ void http_conn::unmap(){
 bool http_conn::write(){
     //发送结果
     int temp = 0;
-    //已经发送的长度
-    int bytes_have_send = 0;
-    //还要发送的长度
-    int bytes_to_send = m_write_idx;
     
+    int newadd = 0;
     //如果没有要法发的就进入下次监听
     if( bytes_to_send == 0){
         modfd( m_epollfd, m_sockfd, EPOLLIN);
@@ -366,10 +410,24 @@ bool http_conn::write(){
     }
 
     while(1){
+        //把响应报文的状态行、消息头、空行和响应正文发送给浏览器端
         temp = writev( m_sockfd, m_iv, m_iv_count );
+        if(temp > 0){
+            bytes_have_send += temp;
+            newadd = bytes_have_send - m_write_idx;
+        }
         if( temp <= -1){
             //eagain说明写缓冲满了
             if( errno == EAGAIN ){
+                //第一个iovec头部信息的数据已发送完，发送第二个iovec数据
+                if (bytes_have_send >= m_iv[0].iov_len){
+                    m_iv[0].iov_len = 0;
+                    m_iv[1].iov_base = m_file_address + newadd;
+                    m_iv[1].iov_len = bytes_to_send;
+                }else{
+                    m_iv[0].iov_base = m_write_buf + bytes_to_send;
+                    m_iv[0].iov_len = m_iv[0].iov_len - bytes_have_send;
+                }
                 //等下次epollout事件再写，在此期间无法接到其他请求，但可以保持连接的完整性
                 modfd( m_epollfd, m_sockfd, EPOLLOUT);
                 return true;
@@ -379,17 +437,18 @@ bool http_conn::write(){
         }
 
         bytes_to_send -= temp;
-        bytes_have_send += temp;
+        //bytes_have_send += temp;
         //因为是先进行写操作再进行两个变量的更新的
         //因此to小于等于have就说明刚刚的操作已经都写完了
-        if( bytes_to_send <= bytes_have_send){
+        if( bytes_to_send <= 0){
+            unmap();
+            //在epoll树上重置EPOLLONESHOT事件
+            modfd(m_epollfd,m_sockfd,EPOLLIN);
             //发送成功，根据是否保持连接来确定是否关闭
             if( m_linger ){
                 init();
-                modfd( m_epollfd, m_sockfd, EPOLLIN);
                 return true;
             }else{
-                modfd( m_epollfd, m_sockfd, EPOLLIN );
                 return false;
             }
         }
@@ -406,6 +465,7 @@ bool http_conn::add_response( const char* format, ... ){
     //将可变参数按format写入数组中
     int len = vsnprintf( m_write_buf + m_write_idx, WRITE_BUFFER_SIZE - 1 - m_write_idx, format, arg_list );
     if( len >= (WRITE_BUFFER_SIZE -1 - m_write_idx) ){
+        va_end(arg_list);
         return false;
     }
     m_write_idx += len;
@@ -515,6 +575,7 @@ bool http_conn::process_write( HTTP_CODE ret ){
     m_iv[ 0 ].iov_base = m_write_buf;
     m_iv[ 0 ].iov_len = m_write_idx;
     m_iv_count = 1;
+    bytes_to_send = m_write_idx;
     return true;
 }
 

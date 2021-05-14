@@ -77,6 +77,7 @@ private:
     bool add_content( const char* content );
     bool add_status_line( int status, const char* title );
     bool add_headers( int content_length );
+    bool add_content_type();
     bool add_content_length( int content_length );
     bool add_linger();
     bool add_blank_line();
@@ -86,6 +87,8 @@ public:
     static int m_epollfd;
     //统计用户数量也是static
     static int m_user_count;
+    //读为0, 写为1
+    int m_state;  
 
 private:
     //负责连接对方的socket
@@ -131,6 +134,17 @@ private:
     //使用writev()执行写操作，也就是散布写，第一行是内存块，第二行是块数量
     struct iovec m_iv[2];
     int m_iv_count;
+    //是否启用的POST
+    int cgi;
+    //存储请求头数据        
+    char *m_string;
+    //还要再发送的长度 
+    int bytes_to_send;
+    //已发送长度
+    int bytes_have_send;
+    //文件目录
+    char *doc_root;
+
 };
 
 #endif

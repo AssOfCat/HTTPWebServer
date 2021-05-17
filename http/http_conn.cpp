@@ -554,6 +554,8 @@ bool http_conn::process_write( HTTP_CODE ret ){
                 m_iv[1].iov_base = m_file_address;
                 m_iv[1].iov_len = m_file_stat.st_size;
                 m_iv_count = 2;
+                //发送的全部数据为响应报文头部信息和文件大小
+                bytes_to_send = m_write_idx + m_file_stat.st_size;
                 //提前结束函数
                 return true;
             }
@@ -595,7 +597,7 @@ void http_conn::process()
         //这个函数本来是有参数的，但有初值
         close_conn();
     }
-
+    //触发写事件
     modfd( m_epollfd, m_sockfd, EPOLLOUT );
     
 }
